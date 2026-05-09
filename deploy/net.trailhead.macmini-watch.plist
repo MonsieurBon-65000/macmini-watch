@@ -18,10 +18,12 @@
     <key>RunAtLoad</key>
     <true/>
 
+    <!-- __USER_HOME__ is rewritten to the installing user's $HOME by deploy/install.sh.
+         launchd does not expand $HOME in StandardOutPath/StandardErrorPath itself. -->
     <key>StandardOutPath</key>
-    <string>/Users/aarongood/Library/Logs/macmini-watch.out.log</string>
+    <string>__USER_HOME__/Library/Logs/macmini-watch.out.log</string>
     <key>StandardErrorPath</key>
-    <string>/Users/aarongood/Library/Logs/macmini-watch.err.log</string>
+    <string>__USER_HOME__/Library/Logs/macmini-watch.err.log</string>
 
     <key>ProcessType</key>
     <string>Background</string>

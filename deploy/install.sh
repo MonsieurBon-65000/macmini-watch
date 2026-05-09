@@ -50,9 +50,10 @@ fi
 # 3. Logs.
 mkdir -p "$LOG_DIR"
 
-# 4. Plist: copy into place.
+# 4. Plist: render __USER_HOME__ -> $HOME and write into place.
 mkdir -p "$HOME/Library/LaunchAgents"
-cp "$SRC_PLIST" "$DST_PLIST"
+sed "s|__USER_HOME__|${HOME}|g" "$SRC_PLIST" > "$DST_PLIST"
+plutil -lint "$DST_PLIST" >/dev/null
 echo "Installed plist to $DST_PLIST"
 
 # 5. (Re-)bootstrap the agent. bootout first so we pick up plist edits cleanly.
