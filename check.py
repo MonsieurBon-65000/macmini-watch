@@ -1,7 +1,8 @@
 #!/usr/bin/env python3
 """
 Polls Apple's Certified Refurbished store for an M4 Mac mini at $600 or less.
-On a new hit, posts to Slack via webhook. Dedupes via state.json.
+On a new hit, fans out to any configured destination (Slack webhook,
+Telegram bot, or both). Dedupes via state.json.
 """
 
 import json
@@ -15,9 +16,11 @@ from pathlib import Path
 PRICE_CAP = int(os.environ.get("PRICE_CAP", "600"))
 STATE_PATH = Path("state.json")
 SLACK_WEBHOOK_URL = os.environ.get("SLACK_WEBHOOK_URL", "").strip()
-# Optional: Slack user ID(s) to @-mention on real hits. Comma-separated for
-# multiple. Leave empty to skip mentions. Test pings never mention anyone.
+# Slack user ID(s) to @-mention on every alert (test pings included).
+# Comma-separated for multiple. Leave empty to skip mentions.
 SLACK_MENTION_USER_IDS = os.environ.get("SLACK_MENTION_USER_IDS", "").strip()
+TELEGRAM_BOT_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN", "").strip()
+TELEGRAM_CHAT_ID = os.environ.get("TELEGRAM_CHAT_ID", "").strip()
 
 UA = (
     "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
@@ -88,7 +91,6 @@ def signature(hit: dict) -> str:
 
 def post_slack(hit: dict) -> None:
     if not SLACK_WEBHOOK_URL:
-        print(f"[slack] (dry-run) would post: {hit}", file=sys.stderr)
         return
     mentions = ""
     if SLACK_MENTION_USER_IDS:
@@ -115,6 +117,39 @@ def post_slack(hit: dict) -> None:
         print(f"[slack] post failed: {e}", file=sys.stderr)
 
 
+def post_telegram(hit: dict) -> None:
+    if not (TELEGRAM_BOT_TOKEN and TELEGRAM_CHAT_ID):
+        return
+    text = (
+        f"\U0001f6a8 Mac mini ${PRICE_CAP} hit — {hit['retailer']}\n"
+        f"{hit['variant']} at ${hit['price']}\n"
+        f"{hit['url']}"
+    )
+    url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
+    payload = json.dumps(
+        {"chat_id": TELEGRAM_CHAT_ID, "text": text, "disable_web_page_preview": True}
+    ).encode("utf-8")
+    req = urllib.request.Request(
+        url,
+        data=payload,
+        headers={"Content-Type": "application/json"},
+        method="POST",
+    )
+    try:
+        with urllib.request.urlopen(req, timeout=15) as resp:
+            resp.read()
+    except (urllib.error.HTTPError, urllib.error.URLError, TimeoutError) as e:
+        print(f"[telegram] post failed: {e}", file=sys.stderr)
+
+
+def notify(hit: dict) -> None:
+    if not (SLACK_WEBHOOK_URL or (TELEGRAM_BOT_TOKEN and TELEGRAM_CHAT_ID)):
+        print(f"[notify] (dry-run, no destinations configured) would post: {hit}", file=sys.stderr)
+        return
+    post_slack(hit)
+    post_telegram(hit)
+
+
 def load_state() -> dict:
     if not STATE_PATH.exists():
         return {}
@@ -130,11 +165,11 @@ def save_state(state: dict) -> None:
 
 def main() -> int:
     if os.environ.get("TEST_PING") == "1":
-        print("[test] sending Slack test ping")
-        post_slack(
+        print("[test] sending test ping to all configured destinations")
+        notify(
             {
                 "retailer": "TEST",
-                "variant": "end-to-end Slack wiring test",
+                "variant": "end-to-end notification wiring test",
                 "price": 0,
                 "url": "https://www.apple.com/shop/refurbished/mac/mac-mini",
             }
@@ -157,7 +192,7 @@ def main() -> int:
 
     for key in new_keys:
         print(f"[alert] new hit: {key}")
-        post_slack(current[key])
+        notify(current[key])
 
     save_state(current)
     return 0
