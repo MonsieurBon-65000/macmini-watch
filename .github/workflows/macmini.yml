@@ -1,17 +1,16 @@
 name: Mac Mini stock watch
 
 on:
-  schedule:
-    - cron: "*/10 * * * *"
+  # Schedule disabled — periodic polling now runs on the Mac Mini via launchd
+  # (see ~/Library/LaunchAgents/net.trailhead.macmini-watch.plist).
+  # workflow_dispatch is kept so the Slack webhook can still be smoke-tested
+  # from the Actions tab without involving the Mac Mini.
   workflow_dispatch:
     inputs:
       test_ping:
         description: "Send a Slack test ping and exit (no real check)"
         type: boolean
         default: false
-
-permissions:
-  contents: write
 
 env:
   FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: "true"
@@ -37,13 +36,3 @@ jobs:
           TEST_PING: ${{ inputs.test_ping == true && '1' || '0' }}
           PRICE_CAP: "600"
         run: python check.py
-
-      - name: Commit state if changed
-        run: |
-          if ! git diff --quiet -- state.json; then
-            git config user.name  "github-actions[bot]"
-            git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-            git add state.json
-            git commit -m "update state"
-            git push
-          fi
