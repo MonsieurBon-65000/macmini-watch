@@ -60,10 +60,11 @@ The script POSTs JSON (`retailer`, `product`, `variant`, `price`, `cap`, `url`) 
 - HA box: `homeassistant.local` (192.168.68.88)
 - HA config share: `smb://homeassistant.local/config` (mount at `/Volumes/config`)
 - HA automations file: `/Volumes/config/automations.yaml` (HA's `automation:` integration uses this)
-- Aaron's iPhone notify service: **`notify.mobile_app_aaron_iphone_14`**
-  - Device id in HA: `9dbb329938e763895a25778dd0ebd95a`
-  - mobile_app config_entry id: `01J976DBN3BBJFG7F5XQ3TMDMF`
-  - Slug derived from device name "Aaron iPhone 14"
+- Aaron's iPhone notify service: **`notify.mobile_app_aaron_iphone`**
+  - Device id (older config_entry): `9dbb329938e763895a25778dd0ebd95a` (entry `01J976DBN3BBJFG7F5XQ3TMDMF`)
+  - Device id (newer config_entry): `a85100f6fd2a7fa6c9fd948c16e1b102` (entry `01JF802KWKWYGCA6NS9XM4N46R`)
+  - Both devices share the **device-registry name "Aaron iPhone"** even though one config-entry is titled "Aaron iPhone 14". The notify slug is derived from `device_registry.name`, not the config-entry title — so it's `aaron_iphone`, NOT `aaron_iphone_14`. We learned this the hard way: the initial automation pointed at `_aaron_iphone_14` and HA silently logged `Action notify.mobile_app_aaron_iphone_14 not found` on every fire.
+  - If both registrations are simultaneously active, HA would expose the second as `mobile_app_aaron_iphone_2`. Currently we just use `_aaron_iphone` — if alerts mysteriously stop reaching the right phone, check Settings → Devices & Services → Mobile App for stale registrations to delete.
 - Automation alias: `Mac refurb critical alert`, id `macmini_watch_critical_alert`
 - Webhook id: `macmini_watch_alert_N59Csqk_XimmbxSrRCBhypArI9Cy3vy2hC1GQ40WEzA` (local-only)
 - Webhook URL the script posts to: `http://192.168.68.88:8123/api/webhook/macmini_watch_alert_N59Csqk_XimmbxSrRCBhypArI9Cy3vy2hC1GQ40WEzA`
