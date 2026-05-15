@@ -17,6 +17,9 @@ import urllib.request
 from pathlib import Path
 
 PRICE_CAP = int(os.environ.get("PRICE_CAP", "600"))
+# Optional minimum RAM (GB) for the Mac mini watch. Unset/empty disables the filter.
+_mini_min_ram_raw = os.environ.get("MINI_MIN_RAM_GB", "").strip()
+MINI_MIN_RAM_GB = int(_mini_min_ram_raw) if _mini_min_ram_raw else None
 # Mac Studio watch is opt-in: leave STUDIO_PRICE_CAP unset/empty to disable.
 _studio_cap_raw = os.environ.get("STUDIO_PRICE_CAP", "").strip()
 STUDIO_PRICE_CAP = int(_studio_cap_raw) if _studio_cap_raw else None
@@ -53,14 +56,19 @@ def fetch(url: str) -> str:
 
 
 def check_apple_refurb(
-    url: str, product: str, chip_pattern: str | None, price_cap: int
+    url: str,
+    product: str,
+    chip_pattern: str | None,
+    price_cap: int,
+    min_ram_gb: int | None = None,
 ) -> list[dict]:
     """Scrape one Apple refurb category page for at-or-below-cap listings.
 
     product is the literal page name ("Mac mini", "Mac Studio") used both
     as a match keyword and in alert text. chip_pattern is an optional
     regex segment (e.g. "M4") that must also appear in the title; pass
-    None to match any chip.
+    None to match any chip. min_ram_gb optionally filters out listings
+    whose title's "NNGB" memory spec falls below the threshold.
     """
     html = fetch(url)
     if not html:
@@ -92,6 +100,10 @@ def check_apple_refurb(
         if key in seen:
             continue
         seen.add(key)
+        if min_ram_gb is not None:
+            ram_matches = [int(g) for g in re.findall(r"(\d+)\s*GB", title, re.IGNORECASE)]
+            if not ram_matches or max(ram_matches) < min_ram_gb:
+                continue
         if price <= price_cap:
             hits.append(
                 {
@@ -200,17 +212,17 @@ def main() -> int:
         return 0
 
     watches = [
-        ("https://www.apple.com/shop/refurbished/mac/mac-mini", "Mac mini", "M4", PRICE_CAP),
+        ("https://www.apple.com/shop/refurbished/mac/mac-mini", "Mac mini", "M4", PRICE_CAP, MINI_MIN_RAM_GB),
     ]
     if STUDIO_PRICE_CAP is not None:
         watches.append(
-            ("https://www.apple.com/shop/refurbished/mac/mac-studio", "Mac Studio", None, STUDIO_PRICE_CAP)
+            ("https://www.apple.com/shop/refurbished/mac/mac-studio", "Mac Studio", None, STUDIO_PRICE_CAP, None)
         )
 
     all_hits: list[dict] = []
-    for url, product, chip, cap in watches:
+    for url, product, chip, cap, min_ram in watches:
         try:
-            all_hits.extend(check_apple_refurb(url, product, chip, cap))
+            all_hits.extend(check_apple_refurb(url, product, chip, cap, min_ram))
         except Exception as e:
             print(f"[check_apple_refurb {product}] error: {e}", file=sys.stderr)
 
