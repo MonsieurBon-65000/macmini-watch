@@ -36,6 +36,7 @@ If you change the LaunchAgent plist itself, the unload/load above is required to
 | `MINI_MIN_RAM_GB` | Optional — filter Mac mini hits to titles showing ≥ NN GB RAM. Unset = no filter |
 | `STUDIO_PRICE_CAP` | Enables Mac Studio watch at this cap. Unset/empty = disabled |
 | `IMAC_PRICE_CAP` | Enables iMac watch at this cap. Used as a pipeline-test channel (iMacs always in stock) |
+| `IMAC_MAX_ALERTS` | Per-run alert cap for the iMac watch. Defaults to **2** — set higher only when intentionally testing burst behavior |
 | `SLACK_WEBHOOK_URL` | Slack incoming webhook |
 | `SLACK_MENTION_USER_IDS` | Optional comma-separated Slack user IDs to `@`-mention |
 | `TELEGRAM_BOT_TOKEN` / `TELEGRAM_CHAT_ID` | Telegram bot destination (both required to enable) |
@@ -87,7 +88,10 @@ Backups: HA writes timestamped `.bak.*` files alongside `automations.yaml` autom
 
 ## Known quirks / debugging notes
 
-- **`state.json` was empty for a long time despite Mac mini and Studio pages returning 200.** The "distinct prices" log line shows prices like $1,099–$1,899 — those don't appear to be true product-row prices but a sidebar/promo list. The regex in `check_apple_refurb` is fragile against Apple's markup; if alerts ever go quiet for weeks, suspect the regex first, not stock availability.
+- **Signature stability matters — alerts fire per `(retailer, variant, price)`.** Originally the variant was the raw 200-char window after the product name, which leaked Apple's inline JSON state (`"},{"sort":...`) and URL `?fnode=...` query params. Both change every page load, so signatures were unstable, dedupe always failed, and every iMac fired an alert every minute. **Fix (2026-05-15):** truncate the captured variant at the first `"`, `?`, `{`, or `}` so titles like `Refurbished-24-inch-iMac-Apple-M4-Chip-...-Blue` are stable. If you ever see alerts repeating for the same product, suspect title leakage first.
+- **State is saved before notifications fire.** Notify failures (e.g. HA down) won't cause a re-alert storm on the next run.
+- **Belt-and-suspenders:** each watch tuple carries a `max_alerts_per_run` cap (6th element). iMac defaults to 2 via `IMAC_MAX_ALERTS`. Mac mini / Studio are uncapped — re-evaluate if either ever bulk-floods.
+- The regex in `check_apple_refurb` is still fragile against Apple's markup. The captured "titles" are actually URL slugs (anchor href values), not visible product copy. They come in both `Refurbished-…-Blue` (title-case canonical link) and `refurbished-…-blue` (lowercase nav link) forms — these dedupe as distinct signatures, so each real product can yield up to 2 alerts. Acceptable for the iMac canary; tighter normalization would be needed if Mac mini ever produces lots of hits.
 - The Mac Studio fetch returns the same byte count as Mac mini in some runs (e.g. both at 653,111 bytes). That suggests Apple may be A/B-serving identical content for both URLs under some conditions, or there's redirect/caching weirdness. Worth re-checking if Studio hits seem off.
 - The `iMac` watch was added explicitly because iMacs are reliably in stock, so it doubles as a pipeline-health canary.
 

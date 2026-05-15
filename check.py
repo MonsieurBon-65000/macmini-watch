@@ -26,6 +26,10 @@ STUDIO_PRICE_CAP = int(_studio_cap_raw) if _studio_cap_raw else None
 # iMac watch is opt-in (currently used as a pipeline test since iMacs are reliably in stock).
 _imac_cap_raw = os.environ.get("IMAC_PRICE_CAP", "").strip()
 IMAC_PRICE_CAP = int(_imac_cap_raw) if _imac_cap_raw else None
+# Per-run alert cap for the iMac watch. Defaults to 2 since iMac is a pipeline-test
+# channel that's always in stock — without a cap a fresh state.json fires a flood.
+_imac_max_raw = os.environ.get("IMAC_MAX_ALERTS", "2").strip()
+IMAC_MAX_ALERTS = int(_imac_max_raw) if _imac_max_raw else None
 STATE_PATH = Path("state.json")
 SLACK_WEBHOOK_URL = os.environ.get("SLACK_WEBHOOK_URL", "").strip()
 # Slack user ID(s) to @-mention on every alert (test pings included).
@@ -98,7 +102,14 @@ def check_apple_refurb(
     hits = []
     seen = set()
     for m in pattern.finditer(html):
-        title = re.sub(r"\s+", " ", re.sub(r"<[^>]+>", "", m.group(1))).strip()
+        raw = re.sub(r"<[^>]+>", "", m.group(1))
+        raw = re.sub(r"\s+", " ", raw).strip()
+        # Apple's markup leaks JSON state (`"},{"sort":...`) and URL-slug
+        # query fragments (`?fnode=...`) into the captured "title". These
+        # vary every page load, so leaving them in the variant breaks
+        # signature-based dedupe and causes infinite re-alerts. Truncate at
+        # the first noise char to stabilize signatures.
+        title = re.split(r'[?"{}]', raw, maxsplit=1)[0].rstrip(" -").strip()
         price = int(m.group(2).replace(",", ""))
         key = (title, price)
         if key in seen:
@@ -242,38 +253,54 @@ def main() -> int:
         )
         return 0
 
+    # Each watch tuple: (url, product, chip_pattern, price_cap, min_ram_gb, max_alerts_per_run)
+    # max_alerts_per_run = None means "alert on every new hit".
     watches = [
-        ("https://www.apple.com/shop/refurbished/mac/mac-mini", "Mac mini", "M4", PRICE_CAP, MINI_MIN_RAM_GB),
+        ("https://www.apple.com/shop/refurbished/mac/mac-mini", "Mac mini", "M4", PRICE_CAP, MINI_MIN_RAM_GB, None),
     ]
     if STUDIO_PRICE_CAP is not None:
         watches.append(
-            ("https://www.apple.com/shop/refurbished/mac/mac-studio", "Mac Studio", None, STUDIO_PRICE_CAP, None)
+            ("https://www.apple.com/shop/refurbished/mac/mac-studio", "Mac Studio", None, STUDIO_PRICE_CAP, None, None)
         )
     if IMAC_PRICE_CAP is not None:
         watches.append(
-            ("https://www.apple.com/shop/refurbished/mac/imac", "iMac", None, IMAC_PRICE_CAP, None)
+            ("https://www.apple.com/shop/refurbished/mac/imac", "iMac", None, IMAC_PRICE_CAP, None, IMAC_MAX_ALERTS)
         )
 
-    all_hits: list[dict] = []
-    for url, product, chip, cap, min_ram in watches:
+    per_watch_hits: list[tuple[str, int | None, list[dict]]] = []
+    for url, product, chip, cap, min_ram, max_alerts in watches:
         try:
-            all_hits.extend(check_apple_refurb(url, product, chip, cap, min_ram))
+            hits = check_apple_refurb(url, product, chip, cap, min_ram)
         except Exception as e:
             print(f"[check_apple_refurb {product}] error: {e}", file=sys.stderr)
+            hits = []
+        per_watch_hits.append((product, max_alerts, hits))
 
+    all_hits = [h for _, _, hits in per_watch_hits for h in hits]
     print(f"hits this run: {len(all_hits)}")
     for h in all_hits:
         print(f"  - {signature(h)} -> {h['url']}")
 
     previous = load_state()
     current = {signature(h): h for h in all_hits}
-    new_keys = set(current) - set(previous)
 
-    for key in new_keys:
-        print(f"[alert] new hit: {key}")
-        notify(current[key])
-
+    # Save state BEFORE notifying so a crash in notify doesn't cause re-alerts next run.
     save_state(current)
+
+    fired = 0
+    for product, max_alerts, hits in per_watch_hits:
+        new_hits = [h for h in hits if signature(h) not in previous]
+        if max_alerts is not None and len(new_hits) > max_alerts:
+            print(
+                f"[notify-cap] {product}: {len(new_hits)} new hits, capped to {max_alerts}",
+                file=sys.stderr,
+            )
+            new_hits = new_hits[:max_alerts]
+        for h in new_hits:
+            print(f"[alert] new hit: {signature(h)}")
+            notify(h)
+            fired += 1
+    print(f"alerts fired this run: {fired}")
     return 0
 
 
