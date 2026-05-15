@@ -18,6 +18,17 @@ The plist's `StandardOutPath` / `StandardErrorPath` can't expand `$HOME` (launch
 
 **Poll interval: 60s** (was 10 min; reduced 2026-05-15). Apple has not (yet) rate-limited the IP at this cadence — keep an eye on `[fetch]` log lines for non-200 responses.
 
+## Daily heartbeat (separate LaunchAgent)
+
+A second LaunchAgent fires `heartbeat.py` once a day at **07:00 local time** to prove the whole notification chain (Mac Mini → HA webhook → Slack + Telegram + iPhone) is alive. If you ever stop getting a 7am heartbeat, something is broken — start debugging immediately rather than waiting weeks for a missing refurb alert to tip you off.
+
+- LaunchAgent plist: `/Users/utility1022/Library/LaunchAgents/net.trailhead.macmini-watch.heartbeat.plist`
+- Logs: `/Users/utility1022/Library/Logs/macmini-watch.heartbeat.{out,err}.log`
+- Schedule: `StartCalendarInterval` Hour=7 Minute=0. **No `RunAtLoad`** — installing the agent does NOT fire a spurious heartbeat. To test on demand, run `/usr/bin/python3 ~/src/macmini-watch/heartbeat.py` directly on the Mac Mini.
+- Reads the same `~/.config/macmini-watch/env` as the watcher; the only new env var it needs is `HEARTBEAT_HA_WEBHOOK_URL` (separate from the alert webhook so HA can route to a heartbeat-specific automation with `✅` instead of `🚨`).
+- HA automation: alias `Mac refurb heartbeat`, separate webhook id from the alert path. Sends critical iOS push (user explicitly asked for critical, even though it weakens the "critical = real refurb" signal).
+- "Last watcher run" age in the heartbeat body is computed from `~/Library/Logs/macmini-watch.err.log` mtime — the 60s watcher writes `[fetch]` lines on every run, so a stale mtime means the watcher LaunchAgent died.
+
 ## Reload sequence after a code change
 
 ```bash
@@ -41,6 +52,7 @@ If you change the LaunchAgent plist itself, the unload/load above is required to
 | `SLACK_MENTION_USER_IDS` | Optional comma-separated Slack user IDs to `@`-mention |
 | `TELEGRAM_BOT_TOKEN` / `TELEGRAM_CHAT_ID` | Telegram bot destination (both required to enable) |
 | `HA_WEBHOOK_URL` | Home Assistant webhook URL for critical iOS push (see below) |
+| `HEARTBEAT_HA_WEBHOOK_URL` | HA webhook for the daily heartbeat (different from `HA_WEBHOOK_URL` so HA can route to a separate automation with heartbeat-specific formatting) |
 
 **Watch out:** the env file historically did NOT end with a trailing newline, so naive `echo >> env` will concatenate onto the last line. Always check the file after appending.
 

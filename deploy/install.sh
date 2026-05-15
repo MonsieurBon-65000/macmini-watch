@@ -12,21 +12,24 @@
 
 set -eu
 
-LABEL="net.trailhead.macmini-watch"
-SRC_PLIST="$(cd "$(dirname "$0")" && pwd)/${LABEL}.plist"
-DST_PLIST="$HOME/Library/LaunchAgents/${LABEL}.plist"
+DEPLOY_DIR="$(cd "$(dirname "$0")" && pwd)"
+# The main watcher (60s loop) and the daily heartbeat are installed
+# side-by-side; both get the same env-file + log-dir treatment.
+LABELS="net.trailhead.macmini-watch net.trailhead.macmini-watch.heartbeat"
 ENV_DIR="$HOME/.config/macmini-watch"
 ENV_FILE="$ENV_DIR/env"
 LOG_DIR="$HOME/Library/Logs"
 GUI_TARGET="gui/$(id -u)"
 
-# 1. Sanity check: the repo's check.py must exist where the plist expects it.
-if [ ! -f "$HOME/src/macmini-watch/check.py" ]; then
-    echo "error: $HOME/src/macmini-watch/check.py not found." >&2
-    echo "       Clone the fork to ~/src/macmini-watch first:" >&2
-    echo "       mkdir -p ~/src && git clone <your fork URL> ~/src/macmini-watch" >&2
-    exit 1
-fi
+# 1. Sanity check: the repo's check.py + heartbeat.py must exist where the plists expect them.
+for script in check.py heartbeat.py; do
+    if [ ! -f "$HOME/src/macmini-watch/$script" ]; then
+        echo "error: $HOME/src/macmini-watch/$script not found." >&2
+        echo "       Clone the fork to ~/src/macmini-watch first:" >&2
+        echo "       mkdir -p ~/src && git clone <your fork URL> ~/src/macmini-watch" >&2
+        exit 1
+    fi
+done
 
 # 2. Env file: create from template if missing, refuse to clobber if present.
 mkdir -p "$ENV_DIR"
@@ -50,20 +53,28 @@ fi
 # 3. Logs.
 mkdir -p "$LOG_DIR"
 
-# 4. Plist: render __USER_HOME__ -> $HOME and write into place.
+# 4. Plists: render __USER_HOME__ -> $HOME and write each into place.
 mkdir -p "$HOME/Library/LaunchAgents"
-sed "s|__USER_HOME__|${HOME}|g" "$SRC_PLIST" > "$DST_PLIST"
-plutil -lint "$DST_PLIST" >/dev/null
-echo "Installed plist to $DST_PLIST"
+for LABEL in $LABELS; do
+    SRC_PLIST="${DEPLOY_DIR}/${LABEL}.plist"
+    DST_PLIST="$HOME/Library/LaunchAgents/${LABEL}.plist"
+    sed "s|__USER_HOME__|${HOME}|g" "$SRC_PLIST" > "$DST_PLIST"
+    plutil -lint "$DST_PLIST" >/dev/null
+    echo "Installed plist to $DST_PLIST"
+done
 
-# 5. (Re-)bootstrap the agent. bootout first so we pick up plist edits cleanly.
-if launchctl print "${GUI_TARGET}/${LABEL}" >/dev/null 2>&1; then
-    launchctl bootout "${GUI_TARGET}/${LABEL}" 2>/dev/null || true
-fi
-launchctl bootstrap "$GUI_TARGET" "$DST_PLIST"
-launchctl enable "${GUI_TARGET}/${LABEL}"
+# 5. (Re-)bootstrap each agent. bootout first so we pick up plist edits cleanly.
+for LABEL in $LABELS; do
+    DST_PLIST="$HOME/Library/LaunchAgents/${LABEL}.plist"
+    if launchctl print "${GUI_TARGET}/${LABEL}" >/dev/null 2>&1; then
+        launchctl bootout "${GUI_TARGET}/${LABEL}" 2>/dev/null || true
+    fi
+    launchctl bootstrap "$GUI_TARGET" "$DST_PLIST"
+    launchctl enable "${GUI_TARGET}/${LABEL}"
+done
 
 echo
-echo "Installed. RunAtLoad=true means a first tick just fired."
-echo "  tail -n 50 $LOG_DIR/macmini-watch.err.log   # see fetch logs"
-echo "  launchctl print ${GUI_TARGET}/${LABEL} | grep -E 'state|last exit'"
+echo "Installed. Watcher RunAtLoad=true fired a first tick; heartbeat fires next at 07:00 local."
+echo "  tail -n 50 $LOG_DIR/macmini-watch.err.log             # watcher fetch logs"
+echo "  tail -n 20 $LOG_DIR/macmini-watch.heartbeat.err.log   # heartbeat logs"
+echo "  launchctl print ${GUI_TARGET}/net.trailhead.macmini-watch | grep -E 'state|last exit'"

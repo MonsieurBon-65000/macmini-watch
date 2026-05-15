@@ -1,0 +1,35 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>net.trailhead.macmini-watch.heartbeat</string>
+
+    <key>ProgramArguments</key>
+    <array>
+        <string>/bin/zsh</string>
+        <string>-c</string>
+        <string>set -a; . "$HOME/.config/macmini-watch/env"; set +a; cd "$HOME/src/macmini-watch" &amp;&amp; exec /usr/bin/python3 heartbeat.py</string>
+    </array>
+
+    <!-- Fires once a day at 07:00 local time. RunAtLoad intentionally
+         absent so installing the agent doesn't trip a spurious heartbeat. -->
+    <key>StartCalendarInterval</key>
+    <dict>
+        <key>Hour</key>
+        <integer>7</integer>
+        <key>Minute</key>
+        <integer>0</integer>
+    </dict>
+
+    <!-- __USER_HOME__ is rewritten to the installing user's $HOME by deploy/install.sh.
+         launchd does not expand $HOME in StandardOutPath/StandardErrorPath itself. -->
+    <key>StandardOutPath</key>
+    <string>__USER_HOME__/Library/Logs/macmini-watch.heartbeat.out.log</string>
+    <key>StandardErrorPath</key>
+    <string>__USER_HOME__/Library/Logs/macmini-watch.heartbeat.err.log</string>
+
+    <key>ProcessType</key>
+    <string>Background</string>
+</dict>
+</plist>
