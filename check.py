@@ -23,6 +23,9 @@ MINI_MIN_RAM_GB = int(_mini_min_ram_raw) if _mini_min_ram_raw else None
 # Mac Studio watch is opt-in: leave STUDIO_PRICE_CAP unset/empty to disable.
 _studio_cap_raw = os.environ.get("STUDIO_PRICE_CAP", "").strip()
 STUDIO_PRICE_CAP = int(_studio_cap_raw) if _studio_cap_raw else None
+# iMac watch is opt-in (currently used as a pipeline test since iMacs are reliably in stock).
+_imac_cap_raw = os.environ.get("IMAC_PRICE_CAP", "").strip()
+IMAC_PRICE_CAP = int(_imac_cap_raw) if _imac_cap_raw else None
 STATE_PATH = Path("state.json")
 SLACK_WEBHOOK_URL = os.environ.get("SLACK_WEBHOOK_URL", "").strip()
 # Slack user ID(s) to @-mention on every alert (test pings included).
@@ -30,6 +33,7 @@ SLACK_WEBHOOK_URL = os.environ.get("SLACK_WEBHOOK_URL", "").strip()
 SLACK_MENTION_USER_IDS = os.environ.get("SLACK_MENTION_USER_IDS", "").strip()
 TELEGRAM_BOT_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN", "").strip()
 TELEGRAM_CHAT_ID = os.environ.get("TELEGRAM_CHAT_ID", "").strip()
+HA_WEBHOOK_URL = os.environ.get("HA_WEBHOOK_URL", "").strip()
 
 UA = (
     "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
@@ -175,12 +179,39 @@ def post_telegram(hit: dict) -> None:
         print(f"[telegram] post failed: {e}", file=sys.stderr)
 
 
+def post_homeassistant(hit: dict) -> None:
+    if not HA_WEBHOOK_URL:
+        return
+    payload = json.dumps(
+        {
+            "retailer": hit["retailer"],
+            "product": hit["product"],
+            "variant": hit["variant"],
+            "price": hit["price"],
+            "cap": hit["cap"],
+            "url": hit["url"],
+        }
+    ).encode("utf-8")
+    req = urllib.request.Request(
+        HA_WEBHOOK_URL,
+        data=payload,
+        headers={"Content-Type": "application/json"},
+        method="POST",
+    )
+    try:
+        with urllib.request.urlopen(req, timeout=15) as resp:
+            resp.read()
+    except (urllib.error.HTTPError, urllib.error.URLError, TimeoutError) as e:
+        print(f"[homeassistant] post failed: {e}", file=sys.stderr)
+
+
 def notify(hit: dict) -> None:
-    if not (SLACK_WEBHOOK_URL or (TELEGRAM_BOT_TOKEN and TELEGRAM_CHAT_ID)):
+    if not (SLACK_WEBHOOK_URL or (TELEGRAM_BOT_TOKEN and TELEGRAM_CHAT_ID) or HA_WEBHOOK_URL):
         print(f"[notify] (dry-run, no destinations configured) would post: {hit}", file=sys.stderr)
         return
     post_slack(hit)
     post_telegram(hit)
+    post_homeassistant(hit)
 
 
 def load_state() -> dict:
@@ -217,6 +248,10 @@ def main() -> int:
     if STUDIO_PRICE_CAP is not None:
         watches.append(
             ("https://www.apple.com/shop/refurbished/mac/mac-studio", "Mac Studio", None, STUDIO_PRICE_CAP, None)
+        )
+    if IMAC_PRICE_CAP is not None:
+        watches.append(
+            ("https://www.apple.com/shop/refurbished/mac/imac", "iMac", None, IMAC_PRICE_CAP, None)
         )
 
     all_hits: list[dict] = []
