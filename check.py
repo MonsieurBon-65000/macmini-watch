@@ -26,6 +26,12 @@ STUDIO_PRICE_CAP = int(_studio_cap_raw) if _studio_cap_raw else None
 # iMac watch is opt-in (currently used as a pipeline test since iMacs are reliably in stock).
 _imac_cap_raw = os.environ.get("IMAC_PRICE_CAP", "").strip()
 IMAC_PRICE_CAP = int(_imac_cap_raw) if _imac_cap_raw else None
+# MacBook Pro watch is opt-in via MBP_PRICE_CAP. MBP_MIN_RAM_GB filters titles by
+# advertised memory (defaults to 128 GB, which only M3/M4 Max configs reach).
+_mbp_cap_raw = os.environ.get("MBP_PRICE_CAP", "").strip()
+MBP_PRICE_CAP = int(_mbp_cap_raw) if _mbp_cap_raw else None
+_mbp_min_ram_raw = os.environ.get("MBP_MIN_RAM_GB", "128").strip()
+MBP_MIN_RAM_GB = int(_mbp_min_ram_raw) if _mbp_min_ram_raw else None
 # Per-run alert cap for the iMac watch. Defaults to 2 since iMac is a pipeline-test
 # channel that's always in stock — without a cap a fresh state.json fires a flood.
 _imac_max_raw = os.environ.get("IMAC_MAX_ALERTS", "2").strip()
@@ -265,6 +271,10 @@ def main() -> int:
     if IMAC_PRICE_CAP is not None:
         watches.append(
             ("https://www.apple.com/shop/refurbished/mac/imac", "iMac", None, IMAC_PRICE_CAP, None, IMAC_MAX_ALERTS)
+        )
+    if MBP_PRICE_CAP is not None:
+        watches.append(
+            ("https://www.apple.com/shop/refurbished/mac/macbook-pro", "MacBook Pro", None, MBP_PRICE_CAP, MBP_MIN_RAM_GB, None)
         )
 
     per_watch_hits: list[tuple[str, int | None, list[dict]]] = []

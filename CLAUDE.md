@@ -48,6 +48,8 @@ If you change the LaunchAgent plist itself, the unload/load above is required to
 | `STUDIO_PRICE_CAP` | Enables Mac Studio watch at this cap. Unset/empty = disabled |
 | `IMAC_PRICE_CAP` | Enables iMac watch at this cap. Used as a pipeline-test channel (iMacs always in stock) |
 | `IMAC_MAX_ALERTS` | Per-run alert cap for the iMac watch. Defaults to **2** — set higher only when intentionally testing burst behavior |
+| `MBP_PRICE_CAP` | Enables MacBook Pro watch at this cap. Unset/empty = disabled |
+| `MBP_MIN_RAM_GB` | Min RAM (GB) filter for the MacBook Pro watch. Defaults to **128** (only M3/M4 Max reach this). Set empty to disable the floor |
 | `SLACK_WEBHOOK_URL` | Slack incoming webhook |
 | `SLACK_MENTION_USER_IDS` | Optional comma-separated Slack user IDs to `@`-mention |
 | `TELEGRAM_BOT_TOKEN` / `TELEGRAM_CHAT_ID` | Telegram bot destination (both required to enable) |
