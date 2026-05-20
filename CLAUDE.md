@@ -101,20 +101,34 @@ After editing `automations.yaml`, **reload automations** from HA (Developer Tool
 
 Backups: HA writes timestamped `.bak.*` files alongside `automations.yaml` automatically. A manual pre-edit backup was saved as `automations.yaml.bak.macmini-watch-pre` before adding our automation.
 
+## Scraper architecture (rewritten 2026-05-20)
+
+Apple **collapsed the per-category refurb URLs** (`/mac/mac-mini`, `/mac/mac-studio`, `/mac/macbook-pro`, `/mac/imac`) — they all now **302-redirect to `/shop/refurbished/mac`**, a single SPA that filters client-side. The old HTML-regex scraper silently broke: every category URL returned the same combined page (iMac-heavy), so it matched nothing for mini/studio/MBP. The daily heartbeat kept the *notification chain* green while *detection* was dead — exactly the failure mode the heartbeat can't catch.
+
+**Current approach (`fetch_refurb_tiles` + `select_hits` in `check.py`):**
+- Fetch `https://www.apple.com/shop/refurbished/mac` **once per run**, then filter per watch (all categories live on that one page now).
+- Listings are NOT in the HTML — they're in an embedded `"tiles":[…]` JSON array. We bracket-match that array and `json.loads` it. Each tile gives clean, stable fields:
+  - `partNumber` (e.g. `FWUE3LL/A`) — stable unit ID
+  - `title` — real product copy ("Refurbished 24-inch iMac Apple M4 Chip…")
+  - `productDetailsUrl` — we prepend `https://www.apple.com` and strip the `?fnode=…` query
+  - `filters.dimensions.refurbClearModel` — category key (`macmini`, `macstudio`, `macbookpro`, `imac`, `macpro`, `macbookair`, `display`)
+  - `filters.dimensions.tsMemorySize` — RAM (`"64gb"` → parsed to int via `parse_ram_gb`)
+  - `price.currentPrice.raw_amount` — current sale price
+- If the `"tiles":[` marker is missing or JSON fails to parse, we log `[parse] …` and return `[]` (degrade to "no hits", don't crash). **If you ever see `[parse]` lines in the err log, Apple changed the markup again — that's your signal detection is down.**
+
+**Watches** are now `(model, product, chip, price_cap, min_ram_gb, max_alerts)` tuples keyed on `refurbClearModel`. `chip` is an optional case-insensitive title substring (Mac mini uses `"M4"`).
+
 ## Known quirks / debugging notes
 
-- **Signature stability matters — alerts fire per `(retailer, variant, price)`.** Originally the variant was the raw 200-char window after the product name, which leaked Apple's inline JSON state (`"},{"sort":...`) and URL `?fnode=...` query params. Both change every page load, so signatures were unstable, dedupe always failed, and every iMac fired an alert every minute. **Fix (2026-05-15):** truncate the captured variant at the first `"`, `?`, `{`, or `}` so titles like `Refurbished-24-inch-iMac-Apple-M4-Chip-...-Blue` are stable. If you ever see alerts repeating for the same product, suspect title leakage first.
+- **Signatures are now stable** — `(retailer, variant, price)` where `variant` is the clean JSON `title`. The old slug/JSON-leakage instability is gone. Dedup within a run is by `(title, price)`, so two in-stock units of the same config yield one alert.
 - **State is saved before notifications fire.** Notify failures (e.g. HA down) won't cause a re-alert storm on the next run.
-- **Belt-and-suspenders:** each watch tuple carries a `max_alerts_per_run` cap (6th element). iMac defaults to 2 via `IMAC_MAX_ALERTS`. Mac mini / Studio are uncapped — re-evaluate if either ever bulk-floods.
-- The regex in `check_apple_refurb` is still fragile against Apple's markup. The captured "titles" are actually URL slugs (anchor href values), not visible product copy. They come in both `Refurbished-…-Blue` (title-case canonical link) and `refurbished-…-blue` (lowercase nav link) forms — these dedupe as distinct signatures, so each real product can yield up to 2 alerts. Acceptable for the iMac canary; tighter normalization would be needed if Mac mini ever produces lots of hits.
-- The Mac Studio fetch returns the same byte count as Mac mini in some runs (e.g. both at 653,111 bytes). That suggests Apple may be A/B-serving identical content for both URLs under some conditions, or there's redirect/caching weirdness. Worth re-checking if Studio hits seem off.
-- The `iMac` watch was added explicitly because iMacs are reliably in stock, so it doubles as a pipeline-health canary.
+- **Belt-and-suspenders:** each watch tuple carries a `max_alerts_per_run` cap (6th element). iMac defaults to 2 via `IMAC_MAX_ALERTS`. Mac mini / Studio / MBP are uncapped — re-evaluate if any ever bulk-floods (e.g. enabling iMac uncapped on a fresh `state.json` would fire ~49 alerts).
+- **Mac mini and Mac Studio are frequently out of stock** (both showed 0 listings on 2026-05-20 while iMac had 71). Zero hits is normal, not a bug — verify by checking the `[apple] N listings in stock by model: {…}` log line, which prints the live category breakdown every run.
+- The `iMac` watch (opt-in via `IMAC_PRICE_CAP`) doubles as a pipeline-health canary since iMacs are reliably in stock.
 
 ## Reference
 
 - Repo: https://github.com/MonsieurBon-65000/macmini-watch
 - Upstream: https://github.com/brosePR/macmini-watch
-- Apple refurb pages:
-  - Mac mini: https://www.apple.com/shop/refurbished/mac/mac-mini
-  - Mac Studio: https://www.apple.com/shop/refurbished/mac/mac-studio
-  - iMac: https://www.apple.com/shop/refurbished/mac/imac
+- Apple refurb page (single combined page; per-category URLs 302-redirect here): https://www.apple.com/shop/refurbished/mac
+  - Per-category links still work in a browser as client-side filters but are NOT separate documents for scraping.

@@ -1,9 +1,15 @@
 #!/usr/bin/env python3
 """
 Polls Apple's Certified Refurbished store for matching listings (M4 Mac
-mini and, optionally, any Mac Studio) at-or-below configurable price caps.
-On a new hit, fans out to any configured destination (Slack webhook,
-Telegram bot, or both). Dedupes via state.json.
+mini and, optionally, Mac Studio / MacBook Pro / iMac) at-or-below
+configurable price caps. On a new hit, fans out to any configured
+destination (Slack webhook, Telegram bot, Home Assistant). Dedupes via
+state.json.
+
+Apple now serves all Mac refurb categories from one page (the old
+per-category URLs 302-redirect there) and filters client-side; the
+listings live in an embedded `"tiles":[…]` JSON blob rather than the
+HTML, so we parse that — see fetch_refurb_tiles().
 """
 
 from __future__ import annotations
@@ -14,6 +20,7 @@ import re
 import sys
 import urllib.error
 import urllib.request
+from collections import Counter
 from pathlib import Path
 
 PRICE_CAP = int(os.environ.get("PRICE_CAP", "600"))
@@ -69,73 +76,137 @@ def fetch(url: str) -> str:
         return ""
 
 
-def check_apple_refurb(
-    url: str,
-    product: str,
-    chip_pattern: str | None,
-    price_cap: int,
-    min_ram_gb: int | None = None,
-) -> list[dict]:
-    """Scrape one Apple refurb category page for at-or-below-cap listings.
+# Apple collapsed the per-category refurb URLs (mac-mini, mac-studio, …) into a
+# single Mac page that 302-redirects everything here and filters client-side.
+# The listings are no longer in the HTML — they live in a `"tiles":[…]` JSON
+# blob with clean, stable fields (partNumber, title, price, category, RAM).
+REFURB_URL = "https://www.apple.com/shop/refurbished/mac"
 
-    product is the literal page name ("Mac mini", "Mac Studio") used both
-    as a match keyword and in alert text. chip_pattern is an optional
-    regex segment (e.g. "M4") that must also appear in the title; pass
-    None to match any chip. min_ram_gb optionally filters out listings
-    whose title's "NNGB" memory spec falls below the threshold.
+# refurbClearModel values Apple uses in each tile's filters.dimensions, mapped
+# to the human label we put in alerts.
+MODEL_LABELS = {
+    "macmini": "Mac mini",
+    "macstudio": "Mac Studio",
+    "macbookpro": "MacBook Pro",
+    "macbookair": "MacBook Air",
+    "imac": "iMac",
+    "macpro": "Mac Pro",
+}
+
+
+def parse_ram_gb(raw: str | None) -> int | None:
+    """'64gb' -> 64. Returns None if unparseable."""
+    if not raw:
+        return None
+    m = re.match(r"(\d+)", raw.strip())
+    return int(m.group(1)) if m else None
+
+
+def fetch_refurb_tiles() -> list[dict]:
+    """Fetch the combined Mac refurb page and parse its `tiles` JSON array.
+
+    Returns one normalized dict per listing with keys: partNumber, title,
+    model (refurbClearModel), ram_gb, price (int USD), url. Returns [] on
+    any fetch/parse failure (logged), so a markup change degrades to "no
+    hits" rather than crashing.
     """
-    html = fetch(url)
+    html = fetch(REFURB_URL)
     if not html:
         return []
-    product_count = len(re.findall(re.escape(product), html, re.IGNORECASE))
-    prices = sorted({p for p in re.findall(r"\$\s*([0-9][0-9,]{2,4}\.\d{2})", html)})
-    if chip_pattern:
-        chip_count = len(re.findall(rf"\b{chip_pattern}\b", html))
-        chip_summary = f", '{chip_pattern}' x{chip_count}"
-    else:
-        chip_summary = ""
+    i = html.find('"tiles":[')
+    if i == -1:
+        print("[parse] '\"tiles\":[' not found — Apple markup changed", file=sys.stderr)
+        return []
+    start = html.index("[", i)
+    depth = 0
+    end = None
+    for j in range(start, len(html)):
+        c = html[j]
+        if c == "[":
+            depth += 1
+        elif c == "]":
+            depth -= 1
+            if depth == 0:
+                end = j + 1
+                break
+    if end is None:
+        print("[parse] tiles array never closed — markup changed", file=sys.stderr)
+        return []
+    try:
+        raw_tiles = json.loads(html[start:end])
+    except json.JSONDecodeError as e:
+        print(f"[parse] tiles JSON decode failed: {e}", file=sys.stderr)
+        return []
+
+    tiles = []
+    for t in raw_tiles:
+        dims = (t.get("filters") or {}).get("dimensions") or {}
+        price_raw = ((t.get("price") or {}).get("currentPrice") or {}).get("raw_amount")
+        if not price_raw:
+            continue
+        try:
+            price = int(round(float(price_raw)))
+        except (TypeError, ValueError):
+            continue
+        pdu = (t.get("productDetailsUrl") or "").split("?")[0]
+        url = f"https://www.apple.com{pdu}" if pdu.startswith("/") else (pdu or REFURB_URL)
+        tiles.append(
+            {
+                "partNumber": t.get("partNumber", ""),
+                "title": (t.get("title") or "").strip(),
+                "model": dims.get("refurbClearModel", ""),
+                "ram_gb": parse_ram_gb(dims.get("tsMemorySize")),
+                "price": price,
+                "url": url,
+            }
+        )
     print(
-        f"[apple/{product}] '{product}' x{product_count}{chip_summary}, "
-        f"distinct prices: {prices[:15]}{'...' if len(prices) > 15 else ''}",
+        f"[apple] {len(tiles)} listings in stock by model: "
+        f"{dict(Counter(t['model'] for t in tiles))}",
         file=sys.stderr,
     )
-    chip_segment = f"{chip_pattern}[^<]{{0,400}}?" if chip_pattern else ""
-    pattern = re.compile(
-        rf"(Refurbished[^<]{{0,200}}{re.escape(product)}[^<]{{0,200}}{chip_segment})"
-        r"[\s\S]{0,3000}?\$\s*([0-9][0-9,]{2,4})\.\d{2}",
-        re.IGNORECASE,
-    )
+    return tiles
+
+
+def select_hits(
+    tiles: list[dict],
+    model: str,
+    product: str,
+    price_cap: int,
+    chip: str | None = None,
+    min_ram_gb: int | None = None,
+) -> list[dict]:
+    """Filter parsed tiles for one watch: matching category, optional chip
+    substring in the title, optional RAM floor, and at-or-below price cap.
+
+    Dedupes identical configs by (title, price) so two in-stock units of the
+    same spec yield a single alert.
+    """
+    matched = [t for t in tiles if t["model"] == model]
+    print(f"[apple/{product}] {len(matched)} in stock; cap=${price_cap}", file=sys.stderr)
     hits = []
-    seen = set()
-    for m in pattern.finditer(html):
-        raw = re.sub(r"<[^>]+>", "", m.group(1))
-        raw = re.sub(r"\s+", " ", raw).strip()
-        # Apple's markup leaks JSON state (`"},{"sort":...`) and URL-slug
-        # query fragments (`?fnode=...`) into the captured "title". These
-        # vary every page load, so leaving them in the variant breaks
-        # signature-based dedupe and causes infinite re-alerts. Truncate at
-        # the first noise char to stabilize signatures.
-        title = re.split(r'[?"{}]', raw, maxsplit=1)[0].rstrip(" -").strip()
-        price = int(m.group(2).replace(",", ""))
-        key = (title, price)
+    seen: set[tuple[str, int]] = set()
+    for t in matched:
+        if chip and chip.lower() not in t["title"].lower():
+            continue
+        if min_ram_gb is not None and (t["ram_gb"] is None or t["ram_gb"] < min_ram_gb):
+            continue
+        if t["price"] > price_cap:
+            continue
+        key = (t["title"], t["price"])
         if key in seen:
             continue
         seen.add(key)
-        if min_ram_gb is not None:
-            ram_matches = [int(g) for g in re.findall(r"(\d+)\s*GB", title, re.IGNORECASE)]
-            if not ram_matches or max(ram_matches) < min_ram_gb:
-                continue
-        if price <= price_cap:
-            hits.append(
-                {
-                    "retailer": "Apple Refurb",
-                    "product": product,
-                    "variant": title[:140],
-                    "price": price,
-                    "cap": price_cap,
-                    "url": url,
-                }
-            )
+        hits.append(
+            {
+                "retailer": "Apple Refurb",
+                "product": product,
+                "variant": (t["title"] or t["partNumber"])[:140],
+                "price": t["price"],
+                "cap": price_cap,
+                "url": t["url"],
+            }
+        )
     return hits
 
 
@@ -259,30 +330,28 @@ def main() -> int:
         )
         return 0
 
-    # Each watch tuple: (url, product, chip_pattern, price_cap, min_ram_gb, max_alerts_per_run)
-    # max_alerts_per_run = None means "alert on every new hit".
+    # Each watch tuple: (model, product, chip, price_cap, min_ram_gb, max_alerts_per_run)
+    # model is Apple's refurbClearModel key; chip is an optional title substring
+    # ("M4"); max_alerts_per_run = None means "alert on every new hit".
     watches = [
-        ("https://www.apple.com/shop/refurbished/mac/mac-mini", "Mac mini", "M4", PRICE_CAP, MINI_MIN_RAM_GB, None),
+        ("macmini", "Mac mini", "M4", PRICE_CAP, MINI_MIN_RAM_GB, None),
     ]
     if STUDIO_PRICE_CAP is not None:
-        watches.append(
-            ("https://www.apple.com/shop/refurbished/mac/mac-studio", "Mac Studio", None, STUDIO_PRICE_CAP, None, None)
-        )
+        watches.append(("macstudio", "Mac Studio", None, STUDIO_PRICE_CAP, None, None))
     if IMAC_PRICE_CAP is not None:
-        watches.append(
-            ("https://www.apple.com/shop/refurbished/mac/imac", "iMac", None, IMAC_PRICE_CAP, None, IMAC_MAX_ALERTS)
-        )
+        watches.append(("imac", "iMac", None, IMAC_PRICE_CAP, None, IMAC_MAX_ALERTS))
     if MBP_PRICE_CAP is not None:
-        watches.append(
-            ("https://www.apple.com/shop/refurbished/mac/macbook-pro", "MacBook Pro", None, MBP_PRICE_CAP, MBP_MIN_RAM_GB, None)
-        )
+        watches.append(("macbookpro", "MacBook Pro", None, MBP_PRICE_CAP, MBP_MIN_RAM_GB, None))
+
+    # All categories now live on one page, so fetch + parse once and filter per watch.
+    tiles = fetch_refurb_tiles()
 
     per_watch_hits: list[tuple[str, int | None, list[dict]]] = []
-    for url, product, chip, cap, min_ram, max_alerts in watches:
+    for model, product, chip, cap, min_ram, max_alerts in watches:
         try:
-            hits = check_apple_refurb(url, product, chip, cap, min_ram)
+            hits = select_hits(tiles, model, product, cap, chip, min_ram)
         except Exception as e:
-            print(f"[check_apple_refurb {product}] error: {e}", file=sys.stderr)
+            print(f"[select_hits {product}] error: {e}", file=sys.stderr)
             hits = []
         per_watch_hits.append((product, max_alerts, hits))
 
