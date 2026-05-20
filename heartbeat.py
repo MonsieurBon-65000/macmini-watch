@@ -6,12 +6,19 @@ notification chain is alive — Mac Mini -> HA webhook + Slack +
 Telegram -> phone -- so we'd notice silently-broken plumbing
 before missing a real refurb hit.
 
-Reads the same env file as check.py. The watcher's err log mtime
-is used as a proxy for "is the regular 60s watcher still alive."
+Reads the same env file as check.py. Two independent health signals:
+  1. The watcher's err log mtime — proxy for "is the 60s watcher process
+     still alive."
+  2. A live retrieval probe — actually runs check.fetch_refurb_tiles() and
+     confirms it parses listings. This is the signal the notification chain
+     alone CANNOT give us: when Apple changes their markup the watcher keeps
+     running and notifying fine, but parses 0 listings and silently stops
+     detecting anything. The heartbeat now catches that.
 """
 
 from __future__ import annotations
 
+import collections
 import datetime as dt
 import json
 import os
@@ -20,6 +27,10 @@ import time
 import urllib.error
 import urllib.request
 from pathlib import Path
+
+# Make `import check` work regardless of the heartbeat's cwd (launchd runs it
+# from /). check.py lives next to this file.
+sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 SLACK_WEBHOOK_URL = os.environ.get("SLACK_WEBHOOK_URL", "").strip()
 SLACK_MENTION_USER_IDS = os.environ.get("SLACK_MENTION_USER_IDS", "").strip()
@@ -63,7 +74,37 @@ def watches_summary() -> str:
     imac_cap = os.environ.get("IMAC_PRICE_CAP", "").strip()
     if imac_cap:
         parts.append(f"iMac ≤${imac_cap}")
+    mbp_cap = os.environ.get("MBP_PRICE_CAP", "").strip()
+    if mbp_cap:
+        mbp = "MacBook Pro"
+        mbp_ram = os.environ.get("MBP_MIN_RAM_GB", "128").strip()
+        if mbp_ram:
+            mbp += f" ≥{mbp_ram}GB"
+        mbp += f" ≤${mbp_cap}"
+        parts.append(mbp)
     return " · ".join(parts) if parts else "(no watches configured)"
+
+
+def retrieval_health() -> tuple[bool, str]:
+    """Exercise the real scrape/parse path so the heartbeat detects a broken
+    retrieval side (e.g. Apple markup change), not just a dead process.
+
+    Returns (ok, summary). ok is False if the fetch/parse raises or yields
+    zero listings — Apple's full Mac refurb catalog being genuinely empty is
+    near-impossible, so 0 listings means the parser stopped finding the
+    `tiles` JSON.
+    """
+    try:
+        import check
+
+        tiles = check.fetch_refurb_tiles()
+    except Exception as e:
+        return False, f"BROKEN — probe errored: {e}"
+    if not tiles:
+        return False, "BROKEN — 0 listings parsed (Apple markup changed?)"
+    by_model = collections.Counter(t["model"] for t in tiles)
+    breakdown = ", ".join(f"{k}:{v}" for k, v in sorted(by_model.items()))
+    return True, f"OK — {len(tiles)} listings parsed ({breakdown})"
 
 
 def post_json(url: str, payload: dict, label: str) -> bool:
@@ -106,7 +147,9 @@ def post_telegram(title: str, body: str) -> bool:
     )
 
 
-def post_homeassistant(title: str, body: str, last_run_age: str, watches: str) -> bool:
+def post_homeassistant(
+    title: str, body: str, last_run_age: str, watches: str, retrieval_ok: bool, retrieval: str
+) -> bool:
     if not HEARTBEAT_HA_WEBHOOK_URL:
         return True
     return post_json(
@@ -116,6 +159,8 @@ def post_homeassistant(title: str, body: str, last_run_age: str, watches: str) -
             "message": body,
             "last_watcher_run": last_run_age,
             "watches": watches,
+            "retrieval_ok": retrieval_ok,
+            "retrieval": retrieval,
         },
         "homeassistant",
     )
@@ -126,11 +171,13 @@ def main() -> int:
     timestamp = now.strftime("%Y-%m-%d %H:%M %Z")
     last_run = last_watcher_run_age()
     watches = watches_summary()
+    retrieval_ok, retrieval = retrieval_health()
 
-    title = "✅ macmini-watch heartbeat"
+    title = "✅ macmini-watch heartbeat" if retrieval_ok else "⚠️ macmini-watch — RETRIEVAL BROKEN"
     body = (
         f"{timestamp}\n"
         f"Last watcher run: {last_run}\n"
+        f"Retrieval: {retrieval}\n"
         f"Watching: {watches}"
     )
     print(f"[heartbeat] {title}\n{body}", file=sys.stderr)
@@ -142,13 +189,15 @@ def main() -> int:
     results = [
         post_slack(title, body),
         post_telegram(title, body),
-        post_homeassistant(title, body, last_run, watches),
+        post_homeassistant(title, body, last_run, watches, retrieval_ok, retrieval),
     ]
     failed = results.count(False)
     if failed:
         print(f"[heartbeat] {failed} destination(s) failed", file=sys.stderr)
         return 1
-    return 0
+    # Non-zero exit also if retrieval is broken, so the failure is visible in
+    # logs / launchd status even if every notification destination succeeded.
+    return 0 if retrieval_ok else 2
 
 
 if __name__ == "__main__":

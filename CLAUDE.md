@@ -28,6 +28,7 @@ A second LaunchAgent fires `heartbeat.py` once a day at **07:00 local time** to 
 - Reads the same `~/.config/macmini-watch/env` as the watcher; the only new env var it needs is `HEARTBEAT_HA_WEBHOOK_URL` (separate from the alert webhook so HA can route to a heartbeat-specific automation with `✅` instead of `🚨`).
 - HA automation: alias `Mac refurb heartbeat`, separate webhook id from the alert path. Sends critical iOS push (user explicitly asked for critical, even though it weakens the "critical = real refurb" signal).
 - "Last watcher run" age in the heartbeat body is computed from `~/Library/Logs/macmini-watch.err.log` mtime — the 60s watcher writes `[fetch]` lines on every run, so a stale mtime means the watcher LaunchAgent died.
+- **Retrieval probe (added 2026-05-20):** the heartbeat also `import check` and runs `check.fetch_refurb_tiles()` live, reporting `Retrieval: OK — N listings parsed (…)`. If the parse yields 0 (Apple markup changed again), the heartbeat title flips to `⚠️ macmini-watch — RETRIEVAL BROKEN`, the HA payload carries `retrieval_ok: false`, and the script exits non-zero. This closes the gap that bit us: the notification chain can be perfectly healthy while detection is silently dead. The probe hits Apple's site once at 7am — negligible load. (HA automation could branch on `retrieval_ok` to escalate, but the title/emoji change is already visible in Slack/Telegram/push.)
 
 ## Reload sequence after a code change
 
