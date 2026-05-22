@@ -30,6 +30,9 @@ MINI_MIN_RAM_GB = int(_mini_min_ram_raw) if _mini_min_ram_raw else None
 # Mac Studio watch is opt-in: leave STUDIO_PRICE_CAP unset/empty to disable.
 _studio_cap_raw = os.environ.get("STUDIO_PRICE_CAP", "").strip()
 STUDIO_PRICE_CAP = int(_studio_cap_raw) if _studio_cap_raw else None
+# Optional minimum RAM (GB) for the Mac Studio watch. Unset/empty disables the filter.
+_studio_min_ram_raw = os.environ.get("STUDIO_MIN_RAM_GB", "").strip()
+STUDIO_MIN_RAM_GB = int(_studio_min_ram_raw) if _studio_min_ram_raw else None
 # iMac watch is opt-in (currently used as a pipeline test since iMacs are reliably in stock).
 _imac_cap_raw = os.environ.get("IMAC_PRICE_CAP", "").strip()
 IMAC_PRICE_CAP = int(_imac_cap_raw) if _imac_cap_raw else None
@@ -337,7 +340,7 @@ def main() -> int:
         ("macmini", "Mac mini", "M4", PRICE_CAP, MINI_MIN_RAM_GB, None),
     ]
     if STUDIO_PRICE_CAP is not None:
-        watches.append(("macstudio", "Mac Studio", None, STUDIO_PRICE_CAP, None, None))
+        watches.append(("macstudio", "Mac Studio", None, STUDIO_PRICE_CAP, STUDIO_MIN_RAM_GB, None))
     if IMAC_PRICE_CAP is not None:
         watches.append(("imac", "iMac", None, IMAC_PRICE_CAP, None, IMAC_MAX_ALERTS))
     if MBP_PRICE_CAP is not None:
