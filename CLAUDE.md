@@ -47,6 +47,7 @@ If you change the LaunchAgent plist itself, the unload/load above is required to
 | `PRICE_CAP` | Mac mini price ceiling in USD (required; default 600 in code) |
 | `MINI_MIN_RAM_GB` | Optional — filter Mac mini hits to titles showing ≥ NN GB RAM. Unset = no filter |
 | `STUDIO_PRICE_CAP` | Enables Mac Studio watch at this cap. Unset/empty = disabled |
+| `STUDIO_MIN_RAM_GB` | Optional — filter Mac Studio hits to titles showing ≥ NN GB RAM. Unset = no filter (mirrors `MINI_MIN_RAM_GB`) |
 | `IMAC_PRICE_CAP` | Enables iMac watch at this cap. Used as a pipeline-test channel (iMacs always in stock) |
 | `IMAC_MAX_ALERTS` | Per-run alert cap for the iMac watch. Defaults to **2** — set higher only when intentionally testing burst behavior |
 | `MBP_PRICE_CAP` | Enables MacBook Pro watch at this cap. Unset/empty = disabled |
@@ -56,6 +57,8 @@ If you change the LaunchAgent plist itself, the unload/load above is required to
 | `TELEGRAM_BOT_TOKEN` / `TELEGRAM_CHAT_ID` | Telegram bot destination (both required to enable) |
 | `HA_WEBHOOK_URL` | Home Assistant webhook URL for critical iOS push (see below) |
 | `HEARTBEAT_HA_WEBHOOK_URL` | HA webhook for the daily heartbeat (different from `HA_WEBHOOK_URL` so HA can route to a separate automation with heartbeat-specific formatting) |
+
+**Current live config (Mac Mini, as of 2026-05-22):** only the **Mac mini** and **Mac Studio** watches are enabled, both with a **64 GB RAM floor** (`MINI_MIN_RAM_GB=64`, `STUDIO_MIN_RAM_GB=64`) — Aaron wants alerts only for ≥64 GB configs. `PRICE_CAP=5000`, `STUDIO_PRICE_CAP=15000`. The MacBook Pro and iMac watches are **disabled** (`MBP_PRICE_CAP`/`IMAC_PRICE_CAP` unset). Note the mini tops out at 64 GB (M4 Pro), so the floor only ever passes the top-spec mini; the `[apple/Mac mini] N in stock` log line is the *pre-filter* category count, so an in-stock mini below 64 GB will show there but correctly fire no alert. Disabling the iMac watch also removes the always-in-stock pipeline canary — rely on the heartbeat's retrieval probe instead.
 
 **Watch out:** the env file historically did NOT end with a trailing newline, so naive `echo >> env` will concatenate onto the last line. Always check the file after appending.
 
