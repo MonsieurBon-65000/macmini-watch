@@ -58,7 +58,9 @@ If you change the LaunchAgent plist itself, the unload/load above is required to
 | `HA_WEBHOOK_URL` | Home Assistant webhook URL for critical iOS push (see below) |
 | `HEARTBEAT_HA_WEBHOOK_URL` | HA webhook for the daily heartbeat (different from `HA_WEBHOOK_URL` so HA can route to a separate automation with heartbeat-specific formatting) |
 
-**Current live config (Mac Mini, as of 2026-05-22):** only the **Mac mini** and **Mac Studio** watches are enabled, both with a **64 GB RAM floor** (`MINI_MIN_RAM_GB=64`, `STUDIO_MIN_RAM_GB=64`) — Aaron wants alerts only for ≥64 GB configs. `PRICE_CAP=5000`, `STUDIO_PRICE_CAP=15000`. The MacBook Pro and iMac watches are **disabled** (`MBP_PRICE_CAP`/`IMAC_PRICE_CAP` unset). Note the mini tops out at 64 GB (M4 Pro), so the floor only ever passes the top-spec mini; the `[apple/Mac mini] N in stock` log line is the *pre-filter* category count, so an in-stock mini below 64 GB will show there but correctly fire no alert. Disabling the iMac watch also removes the always-in-stock pipeline canary — rely on the heartbeat's retrieval probe instead.
+**Current live config (Mac Mini, as of 2026-05-22):** the real shopping targets are **Mac mini** and **Mac Studio**, both with a **64 GB RAM floor** (`MINI_MIN_RAM_GB=64`, `STUDIO_MIN_RAM_GB=64`) — Aaron wants alerts only for ≥64 GB configs. `PRICE_CAP=5000`, `STUDIO_PRICE_CAP=15000`. The MacBook Pro watch is **disabled** (`MBP_PRICE_CAP` unset). Note the mini tops out at 64 GB (M4 Pro), so the floor only ever passes the top-spec mini; the `[apple/Mac mini] N in stock` log line is the *pre-filter* category count, so an in-stock unit below the floor will show there but correctly fire no alert.
+
+The **iMac watch is enabled (`IMAC_PRICE_CAP=5000`) purely as a pipeline-health canary** — iMacs are reliably in stock, so they prove the alert chain works end-to-end every run. To avoid waking Aaron's phone for Macs he isn't shopping for, **iMac hits skip the HA critical iOS push**: `notify(hit, skip_ha=...)` and the watcher sets `skip_ha = (product == "iMac")`, so iMac alerts post to Slack/Telegram only (look for `[notify] skipping HA critical push for iMac (canary)` in the err log). Capped at `IMAC_MAX_ALERTS` (default 2) per run. This is a *continuous* canary; the heartbeat's 7am retrieval probe is the *daily* detection-health check — they're complementary.
 
 **Watch out:** the env file historically did NOT end with a trailing newline, so naive `echo >> env` will concatenate onto the last line. Always check the file after appending.
 
@@ -67,7 +69,7 @@ If you change the LaunchAgent plist itself, the unload/load above is required to
 `check.py` calls every configured destination on each new hit:
 - Slack (via `SLACK_WEBHOOK_URL`)
 - Telegram (requires both bot token AND chat id)
-- Home Assistant webhook (via `HA_WEBHOOK_URL`)
+- Home Assistant webhook (via `HA_WEBHOOK_URL`) — **skipped for the iMac canary watch** (`notify(hit, skip_ha=True)`) so it never triggers the critical iOS push
 
 Dedupe is signature-based (`retailer|variant|price`) stored in `state.json` next to `check.py`. New listings alert once; existing ones stay silent until they drop out and reappear.
 
