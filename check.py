@@ -217,20 +217,9 @@ def signature(hit: dict) -> str:
     return f"{hit['retailer']}|{hit['variant']}|{hit['price']}"
 
 
-def post_slack(hit: dict) -> None:
+def _slack_send(text: str) -> None:
     if not SLACK_WEBHOOK_URL:
         return
-    mentions = ""
-    if SLACK_MENTION_USER_IDS:
-        ids = [u.strip() for u in SLACK_MENTION_USER_IDS.split(",") if u.strip()]
-        mentions = " ".join(f"<@{u}>" for u in ids)
-        if mentions:
-            mentions += " "
-    text = (
-        f"{mentions}:rotating_light: {hit['product']} ${hit['cap']} hit — {hit['retailer']}\n"
-        f"{hit['variant']} at ${hit['price']}\n"
-        f"{hit['url']}"
-    )
     payload = json.dumps({"text": text}).encode("utf-8")
     req = urllib.request.Request(
         SLACK_WEBHOOK_URL,
@@ -245,14 +234,9 @@ def post_slack(hit: dict) -> None:
         print(f"[slack] post failed: {e}", file=sys.stderr)
 
 
-def post_telegram(hit: dict) -> None:
+def _telegram_send(text: str) -> None:
     if not (TELEGRAM_BOT_TOKEN and TELEGRAM_CHAT_ID):
         return
-    text = (
-        f"\U0001f6a8 {hit['product']} ${hit['cap']} hit — {hit['retailer']}\n"
-        f"{hit['variant']} at ${hit['price']}\n"
-        f"{hit['url']}"
-    )
     url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
     payload = json.dumps(
         {"chat_id": TELEGRAM_CHAT_ID, "text": text, "disable_web_page_preview": True}
@@ -268,6 +252,28 @@ def post_telegram(hit: dict) -> None:
             resp.read()
     except (urllib.error.HTTPError, urllib.error.URLError, TimeoutError) as e:
         print(f"[telegram] post failed: {e}", file=sys.stderr)
+
+
+def post_slack(hit: dict) -> None:
+    mentions = ""
+    if SLACK_MENTION_USER_IDS:
+        ids = [u.strip() for u in SLACK_MENTION_USER_IDS.split(",") if u.strip()]
+        mentions = " ".join(f"<@{u}>" for u in ids)
+        if mentions:
+            mentions += " "
+    _slack_send(
+        f"{mentions}:rotating_light: {hit['product']} ${hit['cap']} hit — {hit['retailer']}\n"
+        f"{hit['variant']} at ${hit['price']}\n"
+        f"{hit['url']}"
+    )
+
+
+def post_telegram(hit: dict) -> None:
+    _telegram_send(
+        f"\U0001f6a8 {hit['product']} ${hit['cap']} hit — {hit['retailer']}\n"
+        f"{hit['variant']} at ${hit['price']}\n"
+        f"{hit['url']}"
+    )
 
 
 def post_homeassistant(hit: dict) -> None:
@@ -296,18 +302,33 @@ def post_homeassistant(hit: dict) -> None:
         print(f"[homeassistant] post failed: {e}", file=sys.stderr)
 
 
-def notify(hit: dict, skip_ha: bool = False) -> None:
+def notify(hit: dict) -> None:
     if not (SLACK_WEBHOOK_URL or (TELEGRAM_BOT_TOKEN and TELEGRAM_CHAT_ID) or HA_WEBHOOK_URL):
         print(f"[notify] (dry-run, no destinations configured) would post: {hit}", file=sys.stderr)
         return
     post_slack(hit)
     post_telegram(hit)
-    # skip_ha suppresses the critical iOS push for low-priority watches (e.g. the
-    # iMac canary), which prove the pipeline is alive without waking the phone.
-    if skip_ha:
-        print(f"[notify] skipping HA critical push for {hit.get('product')} (canary)", file=sys.stderr)
-    else:
-        post_homeassistant(hit)
+    post_homeassistant(hit)
+
+
+# Sentinel signature for the pipeline-health canary; persisted in state.json so a
+# breakage alerts only once (on the transition into broken), not every 60s run.
+CANARY_SIG = "CANARY|imac-retrieval|0"
+
+
+def notify_canary_broken(message: str) -> None:
+    """The iMac canary failed (0 iMacs parsed though they're always in stock),
+    so refurb detection is silently dead. Posts to Slack + Telegram only — no
+    critical iOS push (the 7am heartbeat's retrieval probe covers the phone)."""
+    text = (
+        f"⚠️ macmini-watch CANARY BROKEN — {message}\n"
+        f"0 iMacs parsed, but iMacs are always in stock, so the fetch/parse "
+        f"pipeline is likely dead and real Mac alerts won't fire. "
+        f"Check the err log for [parse]/[fetch] lines.\n"
+        f"https://www.apple.com/shop/refurbished/mac"
+    )
+    _slack_send(text)
+    _telegram_send(text)
 
 
 def load_state() -> dict:
@@ -346,8 +367,9 @@ def main() -> int:
     ]
     if STUDIO_PRICE_CAP is not None:
         watches.append(("macstudio", "Mac Studio", None, STUDIO_PRICE_CAP, STUDIO_MIN_RAM_GB, None))
-    if IMAC_PRICE_CAP is not None:
-        watches.append(("imac", "iMac", None, IMAC_PRICE_CAP, None, IMAC_MAX_ALERTS))
+    # NOTE: iMac is intentionally NOT an alerting watch. It serves only as the
+    # pipeline-health canary (see canary check below) — silent unless detection
+    # breaks. IMAC_PRICE_CAP / IMAC_MAX_ALERTS are retained but unused.
     if MBP_PRICE_CAP is not None:
         watches.append(("macbookpro", "MacBook Pro", None, MBP_PRICE_CAP, MBP_MIN_RAM_GB, None))
 
@@ -368,8 +390,15 @@ def main() -> int:
     for h in all_hits:
         print(f"  - {signature(h)} -> {h['url']}")
 
+    # Canary: iMacs are reliably in stock, so 0 parsed means the fetch/parse
+    # pipeline silently broke. Stays silent while healthy; alerts once per breakage.
+    imac_count = sum(1 for t in tiles if t["model"] == "imac")
+    canary_broken = imac_count == 0
+
     previous = load_state()
     current = {signature(h): h for h in all_hits}
+    if canary_broken:
+        current[CANARY_SIG] = {"broken": True, "total_tiles": len(tiles)}
 
     # Save state BEFORE notifying so a crash in notify doesn't cause re-alerts next run.
     save_state(current)
@@ -383,13 +412,24 @@ def main() -> int:
                 file=sys.stderr,
             )
             new_hits = new_hits[:max_alerts]
-        # The iMac watch is a pipeline-health canary only — fire Slack/Telegram
-        # but never the critical iOS push (Aaron isn't shopping for iMacs).
-        skip_ha = product == "iMac"
         for h in new_hits:
             print(f"[alert] new hit: {signature(h)}")
-            notify(h, skip_ha=skip_ha)
+            notify(h)
             fired += 1
+
+    # Fire the canary alert only on the transition into broken (sentinel absent
+    # from previous state); recovery silently clears it for the next breakage.
+    if canary_broken:
+        msg = f"0 iMacs parsed ({len(tiles)} total tiles)"
+        if CANARY_SIG not in previous:
+            print(f"[canary] BROKEN — {msg}; alerting", file=sys.stderr)
+            notify_canary_broken(msg)
+            fired += 1
+        else:
+            print(f"[canary] still broken — {msg}; already alerted", file=sys.stderr)
+    else:
+        print(f"[canary] ok — {imac_count} iMacs in stock", file=sys.stderr)
+
     print(f"alerts fired this run: {fired}")
     return 0
 
