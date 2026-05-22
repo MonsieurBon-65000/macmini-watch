@@ -48,8 +48,8 @@ If you change the LaunchAgent plist itself, the unload/load above is required to
 | `MINI_MIN_RAM_GB` | Optional — filter Mac mini hits to titles showing ≥ NN GB RAM. Unset = no filter |
 | `STUDIO_PRICE_CAP` | Enables Mac Studio watch at this cap. Unset/empty = disabled |
 | `STUDIO_MIN_RAM_GB` | Optional — filter Mac Studio hits to titles showing ≥ NN GB RAM. Unset = no filter (mirrors `MINI_MIN_RAM_GB`) |
-| `IMAC_PRICE_CAP` | Enables iMac watch at this cap. Used as a pipeline-test channel (iMacs always in stock) |
-| `IMAC_MAX_ALERTS` | Per-run alert cap for the iMac watch. Defaults to **2** — set higher only when intentionally testing burst behavior |
+| `IMAC_PRICE_CAP` | **Unused as of 2026-05-22.** iMac is no longer an alerting watch — it's the silent pipeline canary (see below). Retained in code but ignored |
+| `IMAC_MAX_ALERTS` | **Unused as of 2026-05-22** (was the iMac watch's per-run alert cap). Retained in code but ignored |
 | `MBP_PRICE_CAP` | Enables MacBook Pro watch at this cap. Unset/empty = disabled |
 | `MBP_MIN_RAM_GB` | Min RAM (GB) filter for the MacBook Pro watch. Defaults to **128** (only M3/M4 Max reach this). Set empty to disable the floor |
 | `SLACK_WEBHOOK_URL` | Slack incoming webhook |
@@ -60,18 +60,23 @@ If you change the LaunchAgent plist itself, the unload/load above is required to
 
 **Current live config (Mac Mini, as of 2026-05-22):** the real shopping targets are **Mac mini** and **Mac Studio**, both with a **64 GB RAM floor** (`MINI_MIN_RAM_GB=64`, `STUDIO_MIN_RAM_GB=64`) — Aaron wants alerts only for ≥64 GB configs. `PRICE_CAP=5000`, `STUDIO_PRICE_CAP=15000`. The MacBook Pro watch is **disabled** (`MBP_PRICE_CAP` unset). Note the mini tops out at 64 GB (M4 Pro), so the floor only ever passes the top-spec mini; the `[apple/Mac mini] N in stock` log line is the *pre-filter* category count, so an in-stock unit below the floor will show there but correctly fire no alert.
 
-The **iMac watch is enabled (`IMAC_PRICE_CAP=5000`) purely as a pipeline-health canary** — iMacs are reliably in stock, so they prove the alert chain works end-to-end every run. To avoid waking Aaron's phone for Macs he isn't shopping for, **iMac hits skip the HA critical iOS push**: `notify(hit, skip_ha=...)` and the watcher sets `skip_ha = (product == "iMac")`, so iMac alerts post to Slack/Telegram only (look for `[notify] skipping HA critical push for iMac (canary)` in the err log). Capped at `IMAC_MAX_ALERTS` (default 2) per run. This is a *continuous* canary; the heartbeat's 7am retrieval probe is the *daily* detection-health check — they're complementary.
+**Silent iMac canary (reworked 2026-05-22):** iMac is **no longer an alerting watch** — it produces no alerts when healthy. Instead, the watcher counts parsed iMac tiles each run (`imac_count`); since iMacs are *always* in stock, `imac_count == 0` means the fetch/parse pipeline is silently dead. On that transition it fires `notify_canary_broken()` → **Slack + Telegram only** (no critical iOS push — the 7am heartbeat retrieval probe covers the phone). Look for the `[canary] ok — N iMacs in stock` / `[canary] BROKEN …` / `[canary] still broken …` lines in the err log every run.
+- Dedup: a sentinel signature `CANARY|imac-retrieval|0` (`check.CANARY_SIG`) is written into `state.json` while broken, so the alert fires **once per breakage**, not every 60 s. Recovery (iMacs reappear) drops the sentinel, re-arming it for the next break.
+- The canary is **unconditional** — not gated on any env var (that's why `IMAC_PRICE_CAP`/`IMAC_MAX_ALERTS` are now dead). It's the *continuous* (~60 s) detection-health check; the heartbeat's 7 am retrieval probe is the *daily* one — complementary.
+- To test the broken path on demand: temporarily point the scraper at a bad URL or run `check.main()` with `fetch_refurb_tiles` stubbed to return `[]` (see the local test used when this was built).
 
 **Watch out:** the env file historically did NOT end with a trailing newline, so naive `echo >> env` will concatenate onto the last line. Always check the file after appending.
 
 ## Notification fan-out
 
-`check.py` calls every configured destination on each new hit:
+`check.py`'s `notify(hit)` calls every configured destination on each new hit:
 - Slack (via `SLACK_WEBHOOK_URL`)
 - Telegram (requires both bot token AND chat id)
-- Home Assistant webhook (via `HA_WEBHOOK_URL`) — **skipped for the iMac canary watch** (`notify(hit, skip_ha=True)`) so it never triggers the critical iOS push
+- Home Assistant webhook (via `HA_WEBHOOK_URL`) — the critical iOS push
 
-Dedupe is signature-based (`retailer|variant|price`) stored in `state.json` next to `check.py`. New listings alert once; existing ones stay silent until they drop out and reappear.
+The low-level senders are `_slack_send(text)` / `_telegram_send(text)`; `post_slack`/`post_telegram` build the hit-formatted message and the **canary** path (`notify_canary_broken`) reuses the same two senders to post a plain-text break alert to Slack + Telegram only (no HA).
+
+Dedupe is signature-based (`retailer|variant|price`) stored in `state.json` next to `check.py`. New listings alert once; existing ones stay silent until they drop out and reappear. The canary reuses this same state via the `CANARY|imac-retrieval|0` sentinel.
 
 ## Home Assistant integration
 
@@ -128,9 +133,9 @@ Apple **collapsed the per-category refurb URLs** (`/mac/mac-mini`, `/mac/mac-stu
 
 - **Signatures are now stable** — `(retailer, variant, price)` where `variant` is the clean JSON `title`. The old slug/JSON-leakage instability is gone. Dedup within a run is by `(title, price)`, so two in-stock units of the same config yield one alert.
 - **State is saved before notifications fire.** Notify failures (e.g. HA down) won't cause a re-alert storm on the next run.
-- **Belt-and-suspenders:** each watch tuple carries a `max_alerts_per_run` cap (6th element). iMac defaults to 2 via `IMAC_MAX_ALERTS`. Mac mini / Studio / MBP are uncapped — re-evaluate if any ever bulk-floods (e.g. enabling iMac uncapped on a fresh `state.json` would fire ~49 alerts).
+- **Belt-and-suspenders:** each watch tuple carries a `max_alerts_per_run` cap (6th element). Mac mini / Studio / MBP are currently uncapped — re-evaluate if any ever bulk-floods. (iMac no longer runs as an alerting watch, so its old `IMAC_MAX_ALERTS=2` cap is moot — it's the silent canary now.)
 - **Mac mini and Mac Studio are frequently out of stock** (both showed 0 listings on 2026-05-20 while iMac had 71). Zero hits is normal, not a bug — verify by checking the `[apple] N listings in stock by model: {…}` log line, which prints the live category breakdown every run.
-- The `iMac` watch (opt-in via `IMAC_PRICE_CAP`) doubles as a pipeline-health canary since iMacs are reliably in stock.
+- The `iMac` category is the **silent pipeline-health canary** (since iMacs are reliably in stock): it produces no alerts when healthy and fires Slack/Telegram only when `imac_count == 0` (detection broken). See the "Silent iMac canary" section above.
 
 ## Reference
 
