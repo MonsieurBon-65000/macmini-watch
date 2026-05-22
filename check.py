@@ -296,13 +296,18 @@ def post_homeassistant(hit: dict) -> None:
         print(f"[homeassistant] post failed: {e}", file=sys.stderr)
 
 
-def notify(hit: dict) -> None:
+def notify(hit: dict, skip_ha: bool = False) -> None:
     if not (SLACK_WEBHOOK_URL or (TELEGRAM_BOT_TOKEN and TELEGRAM_CHAT_ID) or HA_WEBHOOK_URL):
         print(f"[notify] (dry-run, no destinations configured) would post: {hit}", file=sys.stderr)
         return
     post_slack(hit)
     post_telegram(hit)
-    post_homeassistant(hit)
+    # skip_ha suppresses the critical iOS push for low-priority watches (e.g. the
+    # iMac canary), which prove the pipeline is alive without waking the phone.
+    if skip_ha:
+        print(f"[notify] skipping HA critical push for {hit.get('product')} (canary)", file=sys.stderr)
+    else:
+        post_homeassistant(hit)
 
 
 def load_state() -> dict:
@@ -378,9 +383,12 @@ def main() -> int:
                 file=sys.stderr,
             )
             new_hits = new_hits[:max_alerts]
+        # The iMac watch is a pipeline-health canary only — fire Slack/Telegram
+        # but never the critical iOS push (Aaron isn't shopping for iMacs).
+        skip_ha = product == "iMac"
         for h in new_hits:
             print(f"[alert] new hit: {signature(h)}")
-            notify(h)
+            notify(h, skip_ha=skip_ha)
             fired += 1
     print(f"alerts fired this run: {fired}")
     return 0
