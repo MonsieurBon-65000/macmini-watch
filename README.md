@@ -1,8 +1,61 @@
 # macmini-watch
 
+> **Retired (2026-10-28).** This watcher is no longer in use. It last ran as a
+> launchd LaunchAgent on a Mac Mini (60s poll + a daily 7am heartbeat), not as
+> the GitHub Actions cron described below. See "Start / stop (launchd)" for how
+> to stop it or bring it back. The rest of this README is kept for historical
+> reference.
+
 A tiny GitHub Actions cron that watches Apple's Certified Refurbished store for an **M4 Mac mini** at-or-below a target price and pings a Slack channel when one shows up.
 
 Runs every ~10 minutes, dedupes hits so you don't get spammed, and shuts up entirely when there's no inventory. Roughly 100 lines of Python with no dependencies.
+
+## Start / stop (launchd)
+
+The watcher is two launchd LaunchAgents on the Mac Mini (user `utility1022`):
+`net.trailhead.macmini-watch` (60 s poll) and `net.trailhead.macmini-watch.heartbeat`
+(daily 07:00). Both scripts below are idempotent and live in `deploy/`.
+
+**Reaching the Mini.** `ssh macmini` uses mDNS (`mac-mini-m4.local`) and only works
+on the home LAN; it has failed to resolve from the laptop at times. `ssh macmini-ts`
+(Tailscale MagicDNS, `mac-mini-m4-pro.tail3283da.ts.net`) works from anywhere on the
+tailnet and is the reliable choice. Substitute whichever resolves.
+
+**Stop (retire):**
+
+```bash
+ssh macmini-ts 'cd ~/src/macmini-watch && git pull && sh deploy/uninstall.sh'
+```
+
+`uninstall.sh` boots out both agents, disables them so they do not return at login,
+and deletes the two plists from `~/Library/LaunchAgents`. It leaves the repo,
+`state.json`, the logs, and `~/.config/macmini-watch/env` in place.
+
+**Start (reinstall):**
+
+```bash
+ssh macmini-ts 'cd ~/src/macmini-watch && git pull && sh deploy/install.sh'
+```
+
+`install.sh` renders the plists, bootstraps and re-enables both agents, and fires a
+first watcher tick immediately (`RunAtLoad`). The heartbeat does not fire on install;
+it next runs at 07:00. The env file must already exist with real secrets, or the
+script stops and tells you to fill it in.
+
+**Verify either way:**
+
+```bash
+ssh macmini-ts 'launchctl list | grep macmini-watch; tail -n 3 ~/Library/Logs/macmini-watch.err.log'
+```
+
+Running: two `net.trailhead.macmini-watch*` lines and a fresh `[canary] ok` log line.
+Stopped: `launchctl list` prints nothing and the log mtime stops advancing.
+
+**Pause without uninstalling** (keeps the plists, resumes at next login or on `load`):
+
+```bash
+ssh macmini-ts 'launchctl unload ~/Library/LaunchAgents/net.trailhead.macmini-watch.plist ~/Library/LaunchAgents/net.trailhead.macmini-watch.heartbeat.plist'
+```
 
 ## How it works
 

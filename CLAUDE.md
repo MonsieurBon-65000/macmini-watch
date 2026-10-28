@@ -1,6 +1,55 @@
 # macmini-watch — Project Notes
 
+> **RETIRED 2026-10-28.** Aaron asked for the project to be retired and the watcher turned off. Both LaunchAgents were removed from the Mac Mini with `deploy/uninstall.sh` (see "Start / stop" below). The notes below describe how it worked while it was live. Don't reinstall unless Aaron asks.
+
 Scraper that polls Apple's Certified Refurbished store for matching Macs and fans out alerts. Aaron's fork of [`brosePR/macmini-watch`](https://github.com/brosePR/macmini-watch), now at [`MonsieurBon-65000/macmini-watch`](https://github.com/MonsieurBon-65000/macmini-watch).
+
+## Start / stop
+
+The watcher is two launchd LaunchAgents on the Mac Mini (user `utility1022`):
+`net.trailhead.macmini-watch` (60 s poll) and `net.trailhead.macmini-watch.heartbeat`
+(daily 07:00). Both scripts below are idempotent and live in `deploy/`.
+
+**Reaching the Mini.** `ssh macmini` uses mDNS (`mac-mini-m4.local`) and only works
+on the home LAN; it has failed to resolve from the laptop at times. `ssh macmini-ts`
+(Tailscale MagicDNS, `mac-mini-m4-pro.tail3283da.ts.net`) works from anywhere on the
+tailnet and is the reliable choice. Substitute whichever resolves.
+
+**Stop (retire):**
+
+```bash
+ssh macmini-ts 'cd ~/src/macmini-watch && git pull && sh deploy/uninstall.sh'
+```
+
+`uninstall.sh` boots out both agents, disables them so they do not return at login,
+and deletes the two plists from `~/Library/LaunchAgents`. It leaves the repo,
+`state.json`, the logs, and `~/.config/macmini-watch/env` in place.
+
+**Start (reinstall):**
+
+```bash
+ssh macmini-ts 'cd ~/src/macmini-watch && git pull && sh deploy/install.sh'
+```
+
+`install.sh` renders the plists, bootstraps and re-enables both agents, and fires a
+first watcher tick immediately (`RunAtLoad`). The heartbeat does not fire on install;
+it next runs at 07:00. The env file must already exist with real secrets, or the
+script stops and tells you to fill it in.
+
+**Verify either way:**
+
+```bash
+ssh macmini-ts 'launchctl list | grep macmini-watch; tail -n 3 ~/Library/Logs/macmini-watch.err.log'
+```
+
+Running: two `net.trailhead.macmini-watch*` lines and a fresh `[canary] ok` log line.
+Stopped: `launchctl list` prints nothing and the log mtime stops advancing.
+
+**Pause without uninstalling** (keeps the plists, resumes at next login or on `load`):
+
+```bash
+ssh macmini-ts 'launchctl unload ~/Library/LaunchAgents/net.trailhead.macmini-watch.plist ~/Library/LaunchAgents/net.trailhead.macmini-watch.heartbeat.plist'
+```
 
 ## Deployment
 
